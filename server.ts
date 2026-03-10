@@ -1,29 +1,44 @@
+import "dotenv/config";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
-import "dotenv/config";
-import { S3Client, ListObjectsV2Command, GetObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import {
+  S3Client,
+  ListObjectsV2Command,
+  GetObjectCommand,
+} from "@aws-sdk/client-s3";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const {
+  R2_ACCOUNT_ID,
+  R2_ACCESS_KEY_ID,
+  R2_SECRET_ACCESS_KEY,
+  R2_BUCKET_NAME,
+  NODE_ENV,
+} = process.env;
+
 // Initialize R2 Client (S3 compatible)
 const r2Client = new S3Client({
   region: "auto",
-  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  endpoint: R2_ACCOUNT_ID
+    ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`
+    : undefined,
   credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",
+    accessKeyId: R2_ACCESS_KEY_ID || "",
+    secretAccessKey: R2_SECRET_ACCESS_KEY || "",
   },
 });
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
+
+  app.use(express.json());
 
   // Ensure uploads directory exists
   const uploadDir = path.join(__dirname, "public", "uploads");
@@ -33,116 +48,136 @@ async function startServer() {
 
   // Configure multer for file storage
   const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
+    destination: (_req, _file, cb) => {
       cb(null, uploadDir);
     },
-    filename: (req, file, cb) => {
-      const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-      cb(null, uniqueSuffix + "-" + file.originalname);
+    filename: (_req, file, cb) => {
+      const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+      cb(null, `${uniqueSuffix}-${file.originalname}`);
     },
   });
 
   const upload = multer({ storage });
+
+  // Simple health check
+  app.get("/api/health", (_req, res) => {
+    res.json({
+      ok: true,
+      environment: NODE_ENV || "development",
+      hasR2Config: Boolean(
+        R2_ACCOUNT_ID &&
+          R2_ACCESS_KEY_ID &&
+          R2_SECRET_ACCESS_KEY &&
+          R2_BUCKET_NAME
+      ),
+    });
+  });
 
   // API Route for file uploads
   app.post("/api/upload", upload.single("file"), (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
     }
-    // Return the URL to the uploaded file
+
     const fileUrl = `/uploads/${req.file.filename}`;
-    res.json({ url: fileUrl });
+    return res.json({ url: fileUrl });
   });
 
   // API Route for listing R2 files
-  app.get("/api/r2/files", async (req, res) => {
+  app.get("/api/r2/files", async (_req, res) => {
     try {
-      if (!process.env.R2_BUCKET_NAME) {
+      if (!R2_BUCKET_NAME) {
         return res.status(400).json({ error: "R2 bucket name not configured" });
       }
 
       const command = new ListObjectsV2Command({
-        Bucket: process.env.R2_BUCKET_NAME,
+        Bucket: R2_BUCKET_NAME,
       });
 
       const response = await r2Client.send(command);
-      
-      // Filter for FBX files and generate proxy URLs
-      const files = (response.Contents || [])
-        .filter(obj => obj.Key?.toLowerCase().endsWith(".fbx"))
-        .map((obj) => {
-          return {
-            key: obj.Key,
-            name: obj.Key?.split("/").pop() || "Unknown",
-            size: obj.Size,
-            lastModified: obj.LastModified,
-            // Use our proxy endpoint instead of a direct signed URL to avoid CORS issues
-            url: `/api/r2/proxy?key=${encodeURIComponent(obj.Key || "")}`
-          };
-        });
 
-      res.json({ files });
+      const files = (response.Contents || [])
+        .filter((obj) => obj.Key?.toLowerCase().endsWith(".fbx"))
+        .map((obj) => ({
+          key: obj.Key,
+          name: obj.Key?.split("/").pop() || "Unknown",
+          size: obj.Size,
+          lastModified: obj.LastModified,
+          url: `/api/r2/proxy?key=${encodeURIComponent(obj.Key || "")}`,
+        }));
+
+      return res.json({ files });
     } catch (error: any) {
       console.error("Error listing R2 files:", error);
-      res.status(500).json({ error: "Failed to list R2 files", details: error.message });
+      return res.status(500).json({
+        error: "Failed to list R2 files",
+        details: error?.message || "Unknown error",
+      });
     }
   });
 
   // API Route for listing R2 textures (images)
-  app.get("/api/r2/textures", async (req, res) => {
+  app.get("/api/r2/textures", async (_req, res) => {
     try {
-      if (!process.env.R2_BUCKET_NAME) {
+      if (!R2_BUCKET_NAME) {
         return res.status(400).json({ error: "R2 bucket name not configured" });
       }
 
       const command = new ListObjectsV2Command({
-        Bucket: process.env.R2_BUCKET_NAME,
-        // Optional: filter by prefix if the user keeps textures in an 'images/' folder
-        // Prefix: "images/" 
+        Bucket: R2_BUCKET_NAME,
       });
 
       const response = await r2Client.send(command);
-      
-      // Filter for image files
+
       const imageExtensions = [".png", ".jpg", ".jpeg", ".webp", ".tga", ".dds"];
       const textures = (response.Contents || [])
-        .filter(obj => imageExtensions.some(ext => obj.Key?.toLowerCase().endsWith(ext)))
-        .map((obj) => {
-          return {
-            key: obj.Key,
-            name: obj.Key?.split("/").pop() || "Unknown",
-            url: `/api/r2/proxy?key=${encodeURIComponent(obj.Key || "")}`
-          };
-        });
+        .filter((obj) =>
+          imageExtensions.some((ext) => obj.Key?.toLowerCase().endsWith(ext))
+        )
+        .map((obj) => ({
+          key: obj.Key,
+          name: obj.Key?.split("/").pop() || "Unknown",
+          url: `/api/r2/proxy?key=${encodeURIComponent(obj.Key || "")}`,
+        }));
 
-      res.json({ textures });
+      return res.json({ textures });
     } catch (error: any) {
       console.error("Error listing R2 textures:", error);
-      res.status(500).json({ error: "Failed to list R2 textures", details: error.message });
+      return res.status(500).json({
+        error: "Failed to list R2 textures",
+        details: error?.message || "Unknown error",
+      });
     }
   });
 
-  // Proxy route to fetch files from R2 and serve them from our domain (bypasses CORS)
+  // Proxy route to fetch files from R2 and serve them from our domain
   app.get("/api/r2/proxy", async (req, res) => {
     const key = req.query.key as string;
-    if (!key) return res.status(400).send("Key is required");
+
+    if (!key) {
+      return res.status(400).send("Key is required");
+    }
+
+    if (!R2_BUCKET_NAME) {
+      return res.status(400).send("R2 bucket name not configured");
+    }
 
     try {
       const command = new GetObjectCommand({
-        Bucket: process.env.R2_BUCKET_NAME,
+        Bucket: R2_BUCKET_NAME,
         Key: key,
       });
 
       const response = await r2Client.send(command);
-      
+
       if (response.ContentType) {
         res.setHeader("Content-Type", response.ContentType);
       }
+
       if (response.ContentLength) {
-        res.setHeader("Content-Length", response.ContentLength);
+        res.setHeader("Content-Length", response.ContentLength.toString());
       }
 
-      // Stream the body to the response
       const body = response.Body as any;
       if (body) {
         body.pipe(res);
@@ -158,18 +193,21 @@ async function startServer() {
   // Serve uploaded files statically
   app.use("/uploads", express.static(uploadDir));
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  // Development: use Vite middleware
+  if (NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
+
     app.use(vite.middlewares);
   } else {
-    // Serve static files in production
-    app.use(express.static(path.join(__dirname, "dist")));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(__dirname, "dist", "index.html"));
+    // Production: serve built frontend
+    const distPath = path.join(__dirname, "dist");
+    app.use(express.static(distPath));
+
+    app.get("/{*any}", (_req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
@@ -178,4 +216,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch((error) => {
+  console.error("Failed to start server:", error);
+  process.exit(1);
+});
