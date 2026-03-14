@@ -1,14 +1,13 @@
 
-import React, { useState, Suspense, useCallback, useRef } from 'react';
+import React, { useState, Suspense, useCallback, useRef, useEffect } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, PerspectiveCamera, Environment, Float, Html } from '@react-three/drei';
+import { OrbitControls, PerspectiveCamera, Environment, Float, Html, Center } from '@react-three/drei';
 import * as THREE from 'three';
 import './types';
 import FBXModel from './components/FBXModel';
-import UIOverlay from './components/UIOverlay';
 import Sidebar from './components/Sidebar';
 import CameraControls from './components/CameraControls';
-import { MaterialSettings, SceneModelInstance, CustomHotspot } from './types';
+import { MaterialSettings, SceneModelInstance } from './types';
 import { speakText } from './services/ttsService';
 
 const CameraHandler: React.FC<{ targetView: { pos: THREE.Vector3, lookAt: THREE.Vector3 } | null, controlsRef: any }> = ({ targetView, controlsRef }) => {
@@ -28,7 +27,9 @@ const App: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isMoveMode, setIsMoveMode] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [targetView, setTargetView] = useState<{ pos: THREE.Vector3, lookAt: THREE.Vector3 } | null>(null);
+  const [environmentUrl, setEnvironmentUrl] = useState<string | null>(null);
   const controlsRef = useRef<any>(null);
   
   const createDefaultSettings = (): MaterialSettings => ({
@@ -36,7 +37,6 @@ const App: React.FC = () => {
     color: '#ffffff', transparent: false, materialMappings: {},
     normalMappings: {}, metalMappings: {}, roughMappings: {}, alphaMappings: {},
     hoveredMaterial: null, isExploded: false, explodeFactor: 0,
-    activeAnnotationId: null, showHotspots: true, isPlacementMode: false, customHotspots: [],
     colorVariants: [], activeVariant: null
   });
 
@@ -60,6 +60,7 @@ const App: React.FC = () => {
         }]);
         setSelectedId(id);
         setTargetView(null);
+        setIsSidebarOpen(false);
       }
     } catch (error) {
       console.error('Upload failed:', error);
@@ -77,10 +78,18 @@ const App: React.FC = () => {
     }]);
     setSelectedId(id);
     setTargetView(null);
+    setIsSidebarOpen(false);
   };
 
   const updateModelData = (id: string, updates: Partial<SceneModelInstance>) => {
     setModels(prev => prev.map(m => m.id === id ? { ...m, ...updates } : m));
+  };
+
+  const updateModelSettings = (id: string, settingsUpdates: Partial<MaterialSettings>) => {
+    setModels(prev => prev.map(m => m.id === id ? { 
+      ...m, 
+      settings: { ...m.settings, ...settingsUpdates } 
+    } : m));
   };
 
   const autoMapR2Textures = useCallback(async (modelId: string, materials: string[]) => {
@@ -184,24 +193,21 @@ const App: React.FC = () => {
     
     const variant = model.settings.colorVariants.find(v => v.name === variantName);
     if (variant) {
-      updateModelData(selectedId, {
-        settings: {
-          ...model.settings,
-          activeVariant: variantName,
-          materialMappings: { ...model.settings.materialMappings, ...variant.mappings }
-        }
+      updateModelSettings(selectedId, {
+        activeVariant: variantName,
+        materialMappings: { ...model.settings.materialMappings, ...variant.mappings }
       });
     }
   };
 
   const handleCameraAction = (action: string, point?: THREE.Vector3) => {
     if (action === 'focus' && point) {
-      // Increased offset (45, 25, 45) to "zoom out" slightly during focus
-      setTargetView({ pos: point.clone().add(new THREE.Vector3(45, 25, 45)), lookAt: point.clone() });
+      // Adjusted offset to be more centered during focus
+      setTargetView({ pos: point.clone().add(new THREE.Vector3(0, 25, 60)), lookAt: point.clone() });
       return;
     }
     if (action === 'reset') {
-      setTargetView({ pos: new THREE.Vector3(40, 30, 70), lookAt: new THREE.Vector3(0, 0, 0) });
+      setTargetView({ pos: new THREE.Vector3(0, 30, 90), lookAt: new THREE.Vector3(0, 0, 0) });
       return;
     }
     setTargetView(null); 
@@ -210,42 +216,6 @@ const App: React.FC = () => {
     if (action === 'zoomIn') controls.object.position.multiplyScalar(0.8);
     if (action === 'zoomOut') controls.object.position.divideScalar(0.8);
     controls.update();
-  };
-
-  const handleAddHotspot = (hs: CustomHotspot) => {
-    if (!selectedId) return;
-    const model = models.find(m => m.id === selectedId);
-    if (!model) return;
-    const updatedHotspots = [...model.settings.customHotspots, hs];
-    updateModelData(selectedId, { settings: { ...model.settings, customHotspots: updatedHotspots, isPlacementMode: false } });
-  };
-
-  const handleUpdateHotspot = (hsId: string, updates: Partial<CustomHotspot>) => {
-    if (!selectedId) return;
-    const model = models.find(m => m.id === selectedId);
-    if (!model) return;
-    
-    const updatedHotspots = model.settings.customHotspots.map(h => 
-      h.id === hsId ? { ...h, ...updates } : h
-    );
-    
-    updateModelData(selectedId, { 
-      settings: { ...model.settings, customHotspots: updatedHotspots } 
-    });
-  };
-
-  const handleRemoveHotspot = (id: string) => {
-    if (!selectedId) return;
-    const model = models.find(m => m.id === selectedId);
-    if (model) {
-      updateModelData(selectedId, {
-        settings: {
-          ...model.settings,
-          customHotspots: model.settings.customHotspots.filter(h => h.id !== id),
-          activeAnnotationId: model.settings.activeAnnotationId === id ? null : model.settings.activeAnnotationId
-        }
-      });
-    }
   };
 
   const handleRemoveModel = (id: string) => {
@@ -287,6 +257,26 @@ const App: React.FC = () => {
     }
   }, [selectedId, models]);
 
+  const handleEnvironmentUpload = useCallback(async (file: File) => {
+    setIsUploading(true);
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const response = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await response.json();
+      if (data.url) {
+        setEnvironmentUrl(data.url);
+      }
+    } catch (error) {
+      console.error('Environment upload failed:', error);
+    } finally {
+      setIsUploading(false);
+    }
+  }, []);
+
   const selectedModel = models.find(m => m.id === selectedId);
 
   const getColorFromName = (name: string) => {
@@ -306,41 +296,42 @@ const App: React.FC = () => {
 
   return (
     <div className="relative w-screen h-screen overflow-hidden flex bg-white text-zinc-900 font-sans transition-colors duration-500">
-      {/* LEFT SIDEBAR - CONTROLS */}
-      <div className="w-[280px] h-full z-20 border-r border-black/5 bg-white flex flex-col shadow-xl">
-        <UIOverlay 
-          settings={selectedModel?.settings || createDefaultSettings()} 
-          setSettings={(ns) => { if (selectedId) updateModelData(selectedId, { settings: ns }); }} 
-          onFileUpload={handleAddFile} 
-          onTextureUpload={handleTextureUpload} 
-          onCameraAction={handleCameraAction} 
-          detectedMaterials={selectedModel?.detectedMaterials || []} 
-          isModelLoaded={!!selectedId} 
-          isMoveMode={isMoveMode} 
-          setMoveMode={setIsMoveMode} 
-        />
-      </div>
+      {/* HAMBURGER MENU BUTTON */}
+      <button 
+        onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+        className="absolute top-4 right-4 sm:top-6 sm:right-6 z-50 w-10 h-10 sm:w-12 sm:h-12 bg-white rounded-xl sm:rounded-2xl shadow-xl border border-black/5 flex items-center justify-center hover:bg-zinc-50 transition-all group"
+      >
+        <div className="space-y-1 sm:space-y-1.5">
+          <div className={`w-4 sm:w-5 h-0.5 bg-zinc-800 transition-all ${isSidebarOpen ? 'rotate-45 translate-y-1.5 sm:translate-y-2' : ''}`}></div>
+          <div className={`w-4 sm:w-5 h-0.5 bg-zinc-800 transition-all ${isSidebarOpen ? 'opacity-0' : ''}`}></div>
+          <div className={`w-4 sm:w-5 h-0.5 bg-zinc-800 transition-all ${isSidebarOpen ? '-rotate-45 -translate-y-1.5 sm:translate-y-2' : ''}`}></div>
+        </div>
+      </button>
 
       {/* CENTER - VIEWPORT */}
       <div className="flex-1 relative bg-white">
-        <CameraControls onAction={handleCameraAction} />
+        <CameraControls 
+          onAction={handleCameraAction} 
+        />
+
+        {/* ACTIVE HOTSPOT DESCRIPTION CARD - REMOVED */}
         
         {/* COLOR VARIANTS - BOTTOM CENTER */}
         {selectedModel && selectedModel.settings.colorVariants.length > 1 && (
-          <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-30 flex items-center gap-4 bg-white/80 backdrop-blur-2xl px-8 py-5 rounded-[3rem] border border-black/5 shadow-2xl animate-in slide-in-from-bottom-10 duration-1000">
-            <div className="flex flex-col mr-4">
-              <span className="text-[8px] font-black uppercase tracking-[0.3em] text-zinc-400 leading-none mb-1">Select Variant</span>
-              <span className="text-[12px] font-black text-zinc-800 uppercase tracking-tight">{selectedModel.settings.activeVariant || 'Default'}</span>
+          <div className="absolute bottom-6 sm:bottom-10 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 sm:gap-4 bg-white/80 backdrop-blur-2xl px-4 sm:px-8 py-3 sm:py-5 rounded-[2rem] sm:rounded-[3rem] border border-black/5 shadow-2xl animate-in slide-in-from-bottom-10 duration-1000 max-w-[90vw] overflow-x-auto no-scrollbar">
+            <div className="flex flex-col mr-2 sm:mr-4 shrink-0">
+              <span className="text-[7px] sm:text-[8px] font-black uppercase tracking-[0.3em] text-zinc-400 leading-none mb-1">Variant</span>
+              <span className="text-[10px] sm:text-[12px] font-black text-zinc-800 uppercase tracking-tight truncate max-w-[60px] sm:max-w-none">{selectedModel.settings.activeVariant || 'Default'}</span>
             </div>
-            <div className="h-8 w-[1px] bg-black/5 mr-2"></div>
-            <div className="flex items-center gap-3">
+            <div className="h-6 sm:h-8 w-[1px] bg-black/5 mr-1 sm:mr-2 shrink-0"></div>
+            <div className="flex items-center gap-2 sm:gap-3">
               {selectedModel.settings.colorVariants.map((variant) => (
                 <button
                   key={variant.name}
                   onClick={() => handleSwitchVariant(variant.name)}
-                  className={`group relative w-10 h-10 rounded-full transition-all duration-500 ${
+                  className={`group relative w-8 h-8 sm:w-10 sm:h-10 rounded-full transition-all duration-500 shrink-0 ${
                     selectedModel.settings.activeVariant === variant.name 
-                    ? 'scale-125 shadow-xl ring-4 ring-yellow-500/20' 
+                    ? 'scale-110 sm:scale-125 shadow-xl ring-4 ring-yellow-500/20' 
                     : 'hover:scale-110'
                   }`}
                   title={variant.name}
@@ -359,7 +350,7 @@ const App: React.FC = () => {
         )}
 
         <Canvas shadows dpr={[1, 2]} gl={{ antialias: true, alpha: true }} onPointerDown={() => { if (isMoveMode) setIsMoveMode(false); setTargetView(null); }}>
-          <PerspectiveCamera makeDefault position={[40, 30, 70]} fov={35} />
+          <PerspectiveCamera makeDefault position={[0, 30, 90]} fov={35} />
           <CameraHandler targetView={targetView} controlsRef={controlsRef} />
           <Suspense fallback={<Html center><div className="text-yellow-500 font-black uppercase tracking-[0.5em] animate-pulse text-[10px]">Initializing...</div></Html>}>
             {isUploading && (
@@ -370,37 +361,29 @@ const App: React.FC = () => {
                 </div>
               </Html>
             )}
+
             <ambientLight intensity={1.2} />
             <spotLight position={[50, 50, 50]} angle={0.15} penumbra={1} intensity={2} castShadow />
             <directionalLight position={[-10, 20, 10]} intensity={1} />
-            <Environment preset="city" />
+            {environmentUrl ? (
+              <Environment files={environmentUrl} background />
+            ) : (
+              <Environment preset="city" />
+            )}
             {models.map((model) => (
-              <group key={model.id} position={model.position} onPointerDown={(e) => { if (model.settings.isPlacementMode) return; e.stopPropagation(); if (selectedId !== model.id) setSelectedId(model.id); }}>
+              <group key={model.id} position={model.position} onPointerDown={(e) => { e.stopPropagation(); if (selectedId !== model.id) setSelectedId(model.id); }}>
                 <Float speed={1.5} rotationIntensity={0.1} floatIntensity={0.1}>
-                  <FBXModel 
-                    url={model.url} 
-                    settings={model.settings} 
-                    onMaterialsLoaded={(mats) => {
-                      if (model.detectedMaterials.length === 0) {
-                        autoMapR2Textures(model.id, mats);
-                      }
-                    }} 
-                    onHotspotClick={(hsId, pos) => {
-                      updateModelData(model.id, { settings: { ...model.settings, activeAnnotationId: hsId } });
-                      if (hsId) {
-                        handleCameraAction('focus', pos);
-                        const hs = model.settings.customHotspots.find(h => h.id === hsId);
-                        if (hs && hs.description) {
-                           speakText(hs.description);
+                  <Center>
+                    <FBXModel 
+                      url={model.url} 
+                      settings={model.settings} 
+                      onMaterialsLoaded={(mats) => {
+                        if (model.detectedMaterials.length === 0) {
+                          autoMapR2Textures(model.id, mats);
                         }
-                      } else {
-                        handleCameraAction('reset');
-                      }
-                    }}
-                    onAddHotspot={handleAddHotspot}
-                    onRemoveHotspot={handleRemoveHotspot}
-                    onUpdateHotspot={handleUpdateHotspot}
-                  />
+                      }} 
+                    />
+                  </Center>
                 </Float>
               </group>
             ))}
@@ -409,21 +392,32 @@ const App: React.FC = () => {
         </Canvas>
       </div>
 
-      {/* RIGHT SIDEBAR - ASSETS */}
-      <div className="w-[340px] h-full z-20 border-l border-black/5 bg-white flex flex-col shadow-xl">
-        <Sidebar 
-          models={models} 
-          selectedId={selectedId} 
-          onSelect={setSelectedId} 
-          onAddFile={handleAddFile} 
-          onAddFromUrl={handleAddFromUrl}
-          onAutoMap={autoMapR2Textures}
-          onSwitchVariant={handleSwitchVariant}
-          onRemove={handleRemoveModel} 
-          onTextureUpload={handleTextureUpload} 
-          onHoverMaterial={(mat) => { if (selectedId) { const curr = models.find(m => m.id === selectedId); if (curr) updateModelData(selectedId, { settings: { ...curr.settings, hoveredMaterial: mat } }); } }} 
-          hoveredMaterial={selectedModel?.settings.hoveredMaterial || null} 
-        />
+      {/* FLOATING ASSET LIBRARY */}
+      <div className={`fixed inset-0 sm:inset-auto sm:top-24 sm:right-6 sm:bottom-6 sm:w-[340px] z-40 transition-all duration-500 transform ${isSidebarOpen ? 'translate-x-0 opacity-100' : 'translate-x-full sm:translate-x-12 opacity-0 pointer-events-none'}`}>
+        <div className="w-full h-full bg-white/95 sm:bg-white/90 backdrop-blur-2xl sm:rounded-[2.5rem] border-b sm:border border-black/5 shadow-2xl overflow-hidden flex flex-col">
+          {/* Mobile Close Button */}
+          <div className="sm:hidden flex justify-end p-4 border-b border-black/5">
+            <button onClick={() => setIsSidebarOpen(false)} className="p-2 text-zinc-400">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <Sidebar 
+            models={models} 
+            selectedId={selectedId} 
+            onSelect={setSelectedId} 
+            onAddFile={handleAddFile} 
+            onAddFromUrl={handleAddFromUrl}
+            onAutoMap={autoMapR2Textures}
+            onSwitchVariant={handleSwitchVariant}
+            onRemove={handleRemoveModel} 
+            onTextureUpload={handleTextureUpload} 
+            onEnvironmentUpload={handleEnvironmentUpload}
+            onHoverMaterial={(mat) => { if (selectedId) { const curr = models.find(m => m.id === selectedId); if (curr) updateModelData(selectedId, { settings: { ...curr.settings, hoveredMaterial: mat } }); } }} 
+            hoveredMaterial={selectedModel?.settings.hoveredMaterial || null} 
+          />
+        </div>
       </div>
     </div>
   );

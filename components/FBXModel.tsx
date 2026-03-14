@@ -5,20 +5,16 @@ import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { Html } from '@react-three/drei';
 import * as THREE from 'three';
 import '../types';
-import { MaterialSettings, CustomHotspot } from '../types';
+import { MaterialSettings } from '../types';
 
 interface FBXModelProps {
   url: string;
   settings: MaterialSettings;
   onMaterialsLoaded?: (materials: string[]) => void;
-  onHotspotClick?: (id: string, position: THREE.Vector3) => void;
-  onAddHotspot?: (hotspot: CustomHotspot) => void;
-  onRemoveHotspot?: (id: string) => void;
-  onUpdateHotspot?: (id: string, updates: Partial<CustomHotspot>) => void;
 }
 
 const FBXModel: React.FC<FBXModelProps> = ({ 
-  url, settings, onMaterialsLoaded, onHotspotClick, onAddHotspot, onRemoveHotspot
+  url, settings, onMaterialsLoaded
 }) => {
   const fbx = useLoader(FBXLoader, url);
   const [textureCache, setTextureCache] = useState<{ [url: string]: THREE.Texture }>({});
@@ -26,12 +22,10 @@ const FBXModel: React.FC<FBXModelProps> = ({
   const initialPositions = useRef<Map<THREE.Object3D, THREE.Vector3>>(new Map());
   const explodeDirections = useRef<Map<THREE.Object3D, THREE.Vector3>>(new Map());
   
-  const [pulse, setPulse] = useState(0);
   const [internalExplodeFactor, setInternalExplodeFactor] = useState(0);
 
-  // Handle real-time animation for pulsing effects and explosion physics
+  // Handle real-time animation for explosion physics
   useFrame((state) => {
-    setPulse(Math.sin(state.clock.elapsedTime * 6) * 0.5 + 0.5);
     const target = settings.isExploded ? 1.0 : 0.0;
     const nextFactor = THREE.MathUtils.lerp(internalExplodeFactor, target, 0.05);
     setInternalExplodeFactor(nextFactor);
@@ -72,61 +66,9 @@ const FBXModel: React.FC<FBXModelProps> = ({
     });
   }, [settings, textureCache]);
 
-  // Pre-process model to center, scale, and extract material names
-  const processedModel = useMemo(() => {
-    fbx.position.set(0, 0, 0); fbx.rotation.set(0, 0, 0); fbx.scale.setScalar(1); fbx.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(fbx);
-    const center = new THREE.Vector3(); box.getCenter(center);
-    const size = new THREE.Vector3(); box.getSize(size);
-    fbx.position.x = -center.x; fbx.position.y = -center.y; fbx.position.z = -center.z;
-    fbx.updateMatrixWorld(true);
-    const targetSize = 35; 
-    const scaleFactor = targetSize / Math.max(size.x, size.y, size.z);
-    fbx.scale.setScalar(scaleFactor); fbx.updateMatrixWorld(true);
-
-    const materialNames: string[] = [];
-    let meshCounter = 0;
-    fbx.traverse((child) => {
-      if ((child as THREE.Mesh).isMesh) {
-        const mesh = child as THREE.Mesh;
-        if (!mesh.name || mesh.name.trim() === "") {
-          mesh.name = `Part_${meshCounter++}`;
-        }
-        const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-        if (mat) {
-          if (!mat.name) mat.name = `Material_${materialNames.length}`;
-          if (!materialNames.includes(mat.name)) materialNames.push(mat.name);
-        }
-        initialPositions.current.set(child, child.position.clone());
-        const worldPos = new THREE.Vector3();
-        child.getWorldPosition(worldPos);
-        explodeDirections.current.set(child, worldPos.normalize());
-      }
-    });
-    if (onMaterialsLoaded) onMaterialsLoaded(materialNames);
-    return fbx;
-  }, [fbx, url]);
-
-  const handlePointerDown = (e: ThreeEvent<PointerEvent>) => {
-    if (!settings.isPlacementMode) return;
-    e.stopPropagation();
-    const { point, object } = e;
-    const mesh = object as THREE.Mesh;
-    const localPos = mesh.worldToLocal(point.clone());
-    const cleanName = mesh.name.replace(/_/g, ' ');
-    const newHotspot: CustomHotspot = {
-      id: Math.random().toString(36).substr(2, 9),
-      meshName: mesh.name,
-      localPosition: localPos,
-      label: cleanName,
-      description: `סקירה טכנית של ${cleanName}. רכיב זה מהווה חלק בלתי נפרד מהמבנה ההנדסי של המודל.`
-    };
-    onAddHotspot?.(newHotspot);
-  };
-
   // Synchronize component state with Three.js MeshStandardMaterial instances
   useEffect(() => {
-    processedModel.traverse((child) => {
+    fbx.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) {
         const mesh = child as THREE.Mesh;
         const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
@@ -148,50 +90,85 @@ const FBXModel: React.FC<FBXModelProps> = ({
           pbr.opacity = settings.opacity;
           const baseColor = settings.color === '#ffffff' ? mat.userData.originalColor : new THREE.Color(settings.color);
           pbr.color.copy(baseColor);
+          
           if (settings.hoveredMaterial === mat.name) {
-            pbr.emissive.setHex(0x6366f1); pbr.emissiveIntensity = pulse * 0.4;
+            pbr.emissive.setHex(0x6366f1); pbr.emissiveIntensity = 0.5;
           } else {
             pbr.emissive.setHex(0x000000); pbr.emissiveIntensity = 0;
           }
+          
           pbr.needsUpdate = true;
           return pbr;
         });
         mesh.material = Array.isArray(mesh.material) ? updatedMaterials : updatedMaterials[0];
       }
     });
-  }, [processedModel, settings, textureCache, pulse]);
+  }, [fbx, settings, textureCache]);
+
+  // Pre-process model to center, scale, and extract material names
+  const processedModel = useMemo(() => {
+    // Reset transformations
+    fbx.position.set(0, 0, 0); 
+    fbx.rotation.set(0, 0, 0); 
+    fbx.scale.setScalar(1); 
+    fbx.updateMatrixWorld(true);
+
+    // 1. Calculate and apply scale first
+    const initialBox = new THREE.Box3();
+    fbx.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        initialBox.expandByObject(child);
+      }
+    });
+
+    if (initialBox.isEmpty()) {
+      // Fallback if no meshes found (unlikely for FBX)
+      initialBox.setFromObject(fbx);
+    }
+
+    const initialSize = new THREE.Vector3(); 
+    initialBox.getSize(initialSize);
+    
+    const targetSize = 35; 
+    const scaleFactor = targetSize / Math.max(initialSize.x, initialSize.y, initialSize.z);
+    fbx.scale.setScalar(scaleFactor); 
+    fbx.updateMatrixWorld(true);
+
+    // 2. Calculate center of the SCALED meshes (for internal use if needed, but we let Center component handle the visual centering)
+    const scaledBox = new THREE.Box3();
+    fbx.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        scaledBox.expandByObject(child);
+      }
+    });
+
+    const materialNames: string[] = [];
+    let meshCounter = 0;
+    fbx.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        const mesh = child as THREE.Mesh;
+        if (!mesh.name || mesh.name.trim() === "") {
+          mesh.name = `Part_${meshCounter++}`;
+        }
+        
+        const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+        if (mat) {
+          if (!mat.name) mat.name = `Material_${materialNames.length}`;
+          if (!materialNames.includes(mat.name)) materialNames.push(mat.name);
+        }
+        initialPositions.current.set(child, child.position.clone());
+        const worldPos = new THREE.Vector3();
+        child.getWorldPosition(worldPos);
+        explodeDirections.current.set(child, worldPos.normalize());
+      }
+    });
+    if (onMaterialsLoaded) onMaterialsLoaded(materialNames);
+    return fbx;
+  }, [fbx, url]);
 
   return (
-    <group onPointerDown={handlePointerDown}>
+    <group>
       <primitive object={processedModel} />
-      {settings.showHotspots && settings.customHotspots.map((h) => {
-        const mesh = fbx.getObjectByName(h.meshName) as THREE.Mesh;
-        if (!mesh) return null;
-
-        // Use createPortal to attach the Html annotation directly to the mesh.
-        // This ensures the annotation follows the mesh as it moves during "explode" modes.
-        return createPortal(
-          <Html 
-            key={h.id} 
-            position={h.localPosition} 
-            distanceFactor={40} 
-            zIndexRange={[100, 0]}
-          >
-            <div className="relative flex items-center justify-center pointer-events-none">
-              <button 
-                onClick={(e) => { 
-                  e.stopPropagation(); 
-                  const wp = new THREE.Vector3();
-                  mesh.localToWorld(wp.copy(h.localPosition));
-                  onHotspotClick?.(h.id, wp); 
-                }}
-                className={`w-6 h-6 rounded-full bg-indigo-600 border-2 border-white shadow-lg pointer-events-auto transition-all hover:scale-125 ${settings.activeAnnotationId === h.id ? 'ring-4 ring-indigo-300' : ''}`}
-              />
-            </div>
-          </Html>,
-          mesh
-        );
-      })}
     </group>
   );
 };
